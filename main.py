@@ -16,6 +16,7 @@ import json
 import os
 import re
 import ssl
+import struct
 import subprocess
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -409,6 +410,75 @@ def _grid_id(app_id: int) -> int:
     return int(app_id) & 0xFFFFFFFF
 
 
+def _shortcuts_vdf_path() -> Optional[str]:
+    root = _steam_root()
+    sid3 = _steamid3()
+    if not root or sid3 is None:
+        return None
+    path = os.path.join(root, "userdata", str(sid3), "config", "shortcuts.vdf")
+    return path if os.path.isfile(path) else None
+
+
+def _parse_shortcuts_vdf(data: bytes) -> List[Dict[str, Any]]:
+    """Minimal binary-VDF parser for shortcuts.vdf. Returns one dict per
+    shortcut with the fields we reconcile against. This is the ground truth for
+    which shortcuts actually exist: the live Steam app overview does not expose a
+    shortcut's Exe/LaunchOptions, so dedup by our stable "<runner> <id>" launch
+    string requires reading this file."""
+    pos = 0
+    length = len(data)
+
+    def read_cstr(i: int) -> tuple:
+        j = data.index(b"\x00", i)
+        return data[i:j].decode("utf-8", "replace"), j + 1
+
+    def parse_map(i: int) -> tuple:
+        d: Dict[str, Any] = {}
+        while i < length:
+            t = data[i]
+            i += 1
+            if t == 0x08:  # end of map
+                return d, i
+            key, i = read_cstr(i)
+            if t == 0x00:  # nested map
+                sub, i = parse_map(i)
+                d[key] = sub
+            elif t == 0x01:  # string
+                val, i = read_cstr(i)
+                d[key] = val
+            elif t == 0x02:  # int32 (LE)
+                val = struct.unpack("<i", data[i : i + 4])[0]
+                i += 4
+                d[key] = val
+            else:  # unknown type: bail out to avoid misparsing
+                return d, i
+        return d, i
+
+    if not data or data[0] != 0x00:
+        return []
+    _key, pos = read_cstr(1)
+    root, _ = parse_map(pos)
+    out: List[Dict[str, Any]] = []
+    for _idx, entry in root.items():
+        if not isinstance(entry, dict):
+            continue
+        appid = entry.get("appid")
+        if appid is None:
+            continue
+        exe = (entry.get("Exe") or entry.get("exe") or "").strip('"')
+        out.append(
+            {
+                "appId": int(appid) & 0xFFFFFFFF,
+                "name": entry.get("AppName") or entry.get("appname") or "",
+                "exe": exe,
+                "launchOptions": entry.get("LaunchOptions")
+                or entry.get("launchoptions")
+                or "",
+            }
+        )
+    return out
+
+
 def _ext_for(url: str, default: str = "jpg") -> str:
     low = url.lower().split("?")[0]
     for ext in ("png", "jpg", "jpeg"):
@@ -589,12 +659,34 @@ class Plugin:
     async def save_appid_map(self, mapping: Dict[str, int]) -> None:
         _write_state("appids.json", mapping)
 
+    async def list_shortcuts(self) -> List[Dict[str, Any]]:
+        """Return every non-Steam shortcut currently in shortcuts.vdf, so the
+        frontend can reconcile against reality (dedup by launch options, adopt
+        orphans) instead of trusting the possibly-stale appId map. Reflects the
+        last state Steam flushed to disk, which is exactly what we need to detect
+        duplicates created in earlier sessions."""
+        path = _shortcuts_vdf_path()
+        if not path:
+            _log_warn("shortcuts.vdf not found; cannot list shortcuts")
+            return []
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+            shortcuts = _parse_shortcuts_vdf(data)
+            _log_info(f"parsed {len(shortcuts)} shortcuts from {path}")
+            return shortcuts
+        except Exception as exc:  # noqa: BLE001
+            _log_error(f"failed to parse shortcuts.vdf: {exc}")
+            return []
+
     # ----- settings --------------------------------------------------------- #
 
     async def get_settings(self) -> Dict[str, Any]:
         defaults = {
             "installPath": os.path.join(_home(), "Games", "Heroic"),
             "stores": {"legendary": True, "gog": True, "nile": True},
+            # remove | keep | skip - see HeroicNativeMode in contract.ts.
+            "heroicNative": "remove",
         }
         stored = _read_state("settings.json", {})
         defaults.update(stored if isinstance(stored, dict) else {})
@@ -1066,6 +1158,27 @@ class Plugin:
             results["logo"] = _write_grid_file(grid, app_id, "_logo", art_logo)
         _log_info(f"grid art for {runner}:{gid} appId={app_id} -> {results}")
         return results
+
+    async def delete_grid_art(self, app_ids: List[int]) -> int:
+        """Delete the persistent grid-art files we wrote for the given appIds.
+        Used by the frontend "Remove all" action to leave no orphaned assets."""
+        grid = _grid_dir()
+        if not grid:
+            return 0
+        deleted = 0
+        for app_id in app_ids:
+            gid = _grid_id(app_id)
+            for suffix in ("p", "_hero", "_logo", ""):
+                for ext in ("jpg", "png"):
+                    path = os.path.join(grid, f"{gid}{suffix}.{ext}")
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                            deleted += 1
+                        except OSError as exc:  # noqa: BLE001
+                            _log_error(f"failed to delete grid file {path}: {exc}")
+        _log_info(f"deleted {deleted} grid files for {len(app_ids)} appIds")
+        return deleted
 
     # ----- lifecycle -------------------------------------------------------- #
 

@@ -228,6 +228,32 @@ export async function moveToInstalledCollection(appId: number): Promise<void> {
   await removeAppFromCollection(appId, "Heroic - Available");
 }
 
+// Delete the "Heroic - *" collections we created (used by "Remove all").
+// Removing the shortcuts already empties them, but this clears the now-empty
+// collections too so nothing of ours is left behind.
+export async function deleteHeroicCollections(): Promise<void> {
+  try {
+    const cols = (collectionStore?.userCollections ?? []).filter(
+      (c: any) =>
+        typeof c?.displayName === "string" &&
+        c.displayName.startsWith("Heroic - ")
+    );
+    for (const col of cols) {
+      try {
+        await col.Delete?.();
+      } catch (e) {
+        console.error(
+          "[HeroicDeckBridge] delete collection failed",
+          col?.displayName,
+          e
+        );
+      }
+    }
+  } catch (e) {
+    console.error("[HeroicDeckBridge] deleteHeroicCollections failed", e);
+  }
+}
+
 // Best-effort nudge so freshly added shortcuts show up without a full restart.
 export function refreshLibrary(): void {
   try {

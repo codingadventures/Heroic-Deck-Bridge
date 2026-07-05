@@ -14,10 +14,12 @@ logic.
 
 ## How it works
 
-- A stable wrapper script (`assets/heroic-run.sh`) backs every card. Steam derives
-  a non-Steam shortcut's appID from `exe path + AppName`, so a constant wrapper +
-  constant title keeps each card (and its artwork) stable regardless of install
-  state. The runner/id ride in launch options, which do not affect the appID.
+- A stable wrapper script (`assets/heroic-run.sh`) backs every card; the
+  runner/id ride in its launch options. Sync **reconciles against the real
+  shortcut list** (read from `shortcuts.vdf` by the backend) keyed by those
+  launch options, so it adopts an existing card for a game and removes stray
+  duplicates instead of trusting a stored appID that Steam can churn. This makes
+  syncing idempotent — running it repeatedly never creates duplicate cards.
 - Pressing a card runs the wrapper, which checks Heroic's `installed.json`:
   - installed -> `heroic://launch/<runner>/<id>` inside the Steam session.
   - not installed -> hands the download to a `systemd-run --user` transient unit
@@ -66,6 +68,14 @@ release URL.
 2. Your Heroic games appear as cards in `Heroic - Epic/GOG/Amazon` collections.
 3. Press a card to install (if needed) or launch.
 
+- **Heroic "Add to Steam" games:** if you also added games through Heroic's own
+  "Add to Steam", choose how to handle the overlap under *Heroic 'Add to Steam'
+  games* — remove Heroic's copy (default, so only the managed card remains), keep
+  both, or defer to Heroic's copy and skip managing that game.
+- **Remove all:** *Maintenance -> Remove all Heroic cards* deletes every card
+  this plugin created (plus its artwork and collections) and resets state, for a
+  clean slate. Your Heroic installs are untouched.
+
 ## Known limitations
 
 These are the irreducible costs of surfacing a non-Steam library inside Game Mode:
@@ -78,8 +88,8 @@ These are the irreducible costs of surfacing a non-Steam library inside Game Mod
 - **SteamOS single-app multitasking is inherently unstable** (zombie games,
   spinning-logo hangs). The plugin keeps downloads out of the reaper's reach, but
   cannot fix Game Mode multitasking generally.
-- **Do not also enable Heroic's own "Add to Steam"** or you will get duplicate
-  cards.
+- **Heroic's own "Add to Steam" cards** are handled per the configurable mode
+  above (default: the plugin removes them so games are not shown twice).
 - New shortcuts may need a library refresh to appear.
 
 > Several Steam-internal calls (artwork asset-type enum, `collectionStore`

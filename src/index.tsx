@@ -1,9 +1,12 @@
 import {
   ButtonItem,
+  ConfirmModal,
+  DropdownItem,
   PanelSection,
   PanelSectionRow,
   TextField,
   ToggleField,
+  showModal,
   staticClasses,
 } from "@decky/ui";
 import {
@@ -31,6 +34,7 @@ import {
   BridgeSettings,
   gameKey,
   HeroicGame,
+  HeroicNativeMode,
   InstallState,
   InstallStatus,
   Job,
@@ -44,7 +48,14 @@ import {
   markDownloading,
   moveToInstalledCollection,
 } from "./steam";
-import { isSyncing, runSync, subscribeSyncing } from "./sync";
+import {
+  isRemoving,
+  isSyncing,
+  runRemoveAll,
+  runSync,
+  subscribeRemoving,
+  subscribeSyncing,
+} from "./sync";
 
 const STATUS_LABEL: Record<JobStatus, string> = {
   queued: "Queued",
@@ -60,6 +71,7 @@ function Content() {
   const [settings, setLocalSettings] = useState<BridgeSettings | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [syncing, setSyncing] = useState(isSyncing());
+  const [removing, setRemoving] = useState(isRemoving());
 
   const gamesRef = useRef<Record<string, HeroicGame>>({});
   const appIdRef = useRef<AppIdMap>({});
@@ -156,10 +168,15 @@ function Content() {
       setSyncing(state);
       if (!state) void refreshMaps();
     });
+    const unsubscribeRemove = subscribeRemoving((state) => {
+      setRemoving(state);
+      if (!state) void refreshMaps();
+    });
     return () => {
       removeEventListener("install_states", stateListener);
       removeEventListener("queue_state", queueListener);
       unsubscribeSync();
+      unsubscribeRemove();
     };
   }, []);
 
@@ -193,6 +210,11 @@ function Content() {
     void persist({ ...settings, stores: { ...settings.stores, [runner]: checked } });
   };
 
+  const setHeroicNative = (mode: HeroicNativeMode) => {
+    if (!settings) return;
+    void persist({ ...settings, heroicNative: mode });
+  };
+
   const onSync = async () => {
     try {
       await runSync();
@@ -202,11 +224,40 @@ function Content() {
     }
   };
 
+  const onRemoveAll = () => {
+    showModal(
+      <ConfirmModal
+        strTitle="Remove all Heroic cards?"
+        strDescription={
+          "This deletes every Steam card this plugin created, its artwork, and " +
+          "the Heroic collections, and resets the appId map. Your Heroic " +
+          "installs are untouched. You can re-create everything with Sync."
+        }
+        strOKButtonText="Remove all"
+        strCancelButtonText="Cancel"
+        onOK={() => {
+          void (async () => {
+            try {
+              await runRemoveAll();
+              await refreshMaps();
+            } catch {
+              /* toast + logging handled by the controller */
+            }
+          })();
+        }}
+      />
+    );
+  };
+
   return (
     <>
       <PanelSection title="Library">
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={onSync} disabled={syncing}>
+          <ButtonItem
+            layout="below"
+            onClick={onSync}
+            disabled={syncing || removing}
+          >
             {syncing ? "Syncing..." : "Sync library to Steam"}
           </ButtonItem>
         </PanelSectionRow>
@@ -228,6 +279,30 @@ function Content() {
             />
           </PanelSectionRow>
         ))}
+      </PanelSection>
+
+      <PanelSection title="Heroic 'Add to Steam' games">
+        <PanelSectionRow>
+          <DropdownItem
+            label="If already added by Heroic"
+            rgOptions={[
+              { data: "remove", label: "Remove Heroic's copy" },
+              { data: "keep", label: "Keep both" },
+              { data: "skip", label: "Use Heroic's copy" },
+            ]}
+            selectedOption={settings?.heroicNative ?? "remove"}
+            onChange={(opt: { data: HeroicNativeMode }) =>
+              setHeroicNative(opt.data)
+            }
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.75rem", opacity: 0.7 }}>
+            For games you also added via Heroic's own "Add to Steam": remove
+            Heroic's card so only ours remains, keep both, or defer to Heroic's
+            card and skip managing that game.
+          </div>
+        </PanelSectionRow>
       </PanelSection>
 
       <PanelSection title="Install location">
@@ -291,6 +366,24 @@ function Content() {
           )}
         </PanelSection>
       )}
+
+      <PanelSection title="Maintenance">
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={onRemoveAll}
+            disabled={syncing || removing}
+          >
+            {removing ? "Removing..." : "Remove all Heroic cards"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.75rem", opacity: 0.7 }}>
+            Deletes every card this plugin created (plus its art and
+            collections) for a clean slate. Your Heroic installs are untouched.
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
 
       <PanelSection title="Notes">
         <PanelSectionRow>

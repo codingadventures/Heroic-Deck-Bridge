@@ -6,6 +6,7 @@ import {
   InstallState,
   Job,
   Runner,
+  SteamShortcut,
 } from "./contract";
 
 export const getGames = callable<[], HeroicGame[]>("get_games");
@@ -25,6 +26,9 @@ export const clearFinishedJobs = callable<[], void>("clear_finished_jobs");
 export const getAppIdMap = callable<[], AppIdMap>("get_appid_map");
 export const saveAppIdMap = callable<[mapping: AppIdMap], void>("save_appid_map");
 
+// Real non-Steam shortcuts from shortcuts.vdf, used to reconcile/dedup.
+export const listShortcuts = callable<[], SteamShortcut[]>("list_shortcuts");
+
 export const getSettings = callable<[], BridgeSettings>("get_settings");
 export const setSettings = callable<[settings: BridgeSettings], void>("set_settings");
 
@@ -38,3 +42,7 @@ export const writeGridArt =
   callable<[appId: number, runner: Runner, id: string], Record<string, boolean>>(
     "write_grid_art"
   );
+
+// Delete the grid-art files we wrote for the given appIds (used by "Remove all").
+export const deleteGridArt =
+  callable<[appIds: number[]], number>("delete_grid_art");

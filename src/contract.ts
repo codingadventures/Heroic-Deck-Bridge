@@ -23,9 +23,17 @@ export interface InstallState {
   progress?: number | null; // 0..1, null when unknown
 }
 
+// How to treat games that already have Heroic's own "Add to Steam" shortcut
+// (exe=flatpak, launched via heroic://) at sync time:
+//   remove - delete Heroic's copy so only our managed card remains
+//   keep   - leave Heroic's copy alone and also keep ours (game shows twice)
+//   skip   - defer to Heroic: remove our copy and don't manage that game
+export type HeroicNativeMode = "remove" | "keep" | "skip";
+
 export interface BridgeSettings {
   installPath: string;
   stores: Record<Runner, boolean>;
+  heroicNative: HeroicNativeMode;
 }
 
 export type JobKind = "install" | "uninstall";
@@ -49,6 +57,16 @@ export interface Job {
 }
 
 export type AppIdMap = Record<string, number>; // "runner:id" -> Steam appId
+
+// A non-Steam shortcut as read from shortcuts.vdf by the backend. Used to
+// reconcile against reality (dedup, adopt orphans) rather than trusting the
+// stored appId map, which can drift when Steam churns shortcut appIds.
+export interface SteamShortcut {
+  appId: number;
+  name: string;
+  exe: string;
+  launchOptions: string;
+}
 
 export const STORE_LABELS: Record<Runner, string> = {
   legendary: "Epic",
