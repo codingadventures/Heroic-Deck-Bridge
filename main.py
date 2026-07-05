@@ -259,6 +259,35 @@ def _wrapper_path() -> str:
     return os.path.join(_bridge_dir(), "heroic-run.sh")
 
 
+def _marker_dir() -> str:
+    d = os.path.join(_bridge_dir(), "installing")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _marker_file(runner: str, gid: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", gid)
+    return os.path.join(_marker_dir(), f"{runner}__{safe}.json")
+
+
+def _write_marker(runner: str, gid: str, path: Optional[str]) -> None:
+    try:
+        with open(_marker_file(runner, gid), "w", encoding="utf-8") as fh:
+            json.dump({"runner": runner, "id": gid, "path": path}, fh)
+    except Exception:
+        pass
+
+
+def _target_size(runner: str, gid: str) -> Optional[int]:
+    for entry in _library_entries(runner):
+        if _entry_id(entry) == gid:
+            install_meta = entry.get("install") if isinstance(entry.get("install"), dict) else {}
+            return _int_or_none(
+                entry.get("install_size") or install_meta.get("install_size")
+            )
+    return None
+
+
 def _dir_size(path: str) -> int:
     total = 0
     try:
@@ -279,9 +308,8 @@ def _dir_size(path: str) -> int:
 
 class Plugin:
     def __init__(self) -> None:
-        # runner:id -> {"targetSize": int|None, "startedAt": float}
-        self._inflight: Dict[str, Dict[str, Any]] = {}
         self._poll_task: Optional[asyncio.Task] = None
+        self._had_active = False
 
     # ----- library ---------------------------------------------------------- #
 
@@ -372,21 +400,13 @@ class Plugin:
         unit = f"heroic-install-{runner}-{safe}"
         proto = self._protocol_cmd("install", runner, gid, path)
         cmd = ["systemd-run", "--user", "--collect", f"--unit={unit}", *proto]
+        # Track this install the same way tile-press installs are tracked.
+        _write_marker(runner, gid, path)
         try:
             subprocess.Popen(_as_user(cmd))
         except FileNotFoundError:
             # No systemd-run available: detach so the reaper can't tree-kill it.
-            subprocess.Popen(
-                _as_user(proto), start_new_session=True
-            )
-        # Record in-flight for progress reporting.
-        key = f"{runner}:{gid}"
-        target = None
-        for entry in _library_entries(runner):
-            if _entry_id(entry) == gid:
-                target = _int_or_none(entry.get("install_size"))
-                break
-        self._inflight[key] = {"targetSize": target, "startedAt": asyncio.get_event_loop().time()}
+            subprocess.Popen(_as_user(proto), start_new_session=True)
 
     async def launch_game(self, runner: str, gid: str) -> None:
         subprocess.Popen(_as_user(self._protocol_cmd("launch", runner, gid)))
@@ -399,36 +419,54 @@ class Plugin:
     async def get_install_states(self) -> List[Dict[str, Any]]:
         return self._compute_states()
 
+    def _read_markers(self) -> List[Dict[str, Any]]:
+        markers: List[Dict[str, Any]] = []
+        try:
+            for name in os.listdir(_marker_dir()):
+                if not name.endswith(".json"):
+                    continue
+                data = _load_json(os.path.join(_marker_dir(), name))
+                if isinstance(data, dict) and data.get("runner") and data.get("id"):
+                    markers.append(data)
+        except OSError:
+            pass
+        return markers
+
     def _compute_states(self) -> List[Dict[str, Any]]:
         states: List[Dict[str, Any]] = []
-        for runner in RUNNERS:
-            installed_ids = _installed_ids(runner)
-            paths = _installed_paths(runner)
-            for key in list(self._inflight.keys()):
-                r, gid = key.split(":", 1)
-                if r != runner:
-                    continue
-                if gid in installed_ids:
-                    states.append({"runner": r, "id": gid, "status": "installed", "progress": 1.0})
-                    self._inflight.pop(key, None)
-                    continue
-                info = self._inflight[key]
-                progress = None
-                target = info.get("targetSize")
-                path = paths.get(gid)
-                if target and path:
-                    progress = min(0.99, _dir_size(path) / float(target))
-                states.append(
-                    {"runner": r, "id": gid, "status": "installing", "progress": progress}
-                )
+        installed_cache: Dict[str, set] = {}
+        for marker in self._read_markers():
+            runner = marker["runner"]
+            gid = marker["id"]
+            if runner not in installed_cache:
+                installed_cache[runner] = _installed_ids(runner)
+            if gid in installed_cache[runner]:
+                states.append({"runner": runner, "id": gid, "status": "installed", "progress": 1.0})
+                try:
+                    os.remove(_marker_file(runner, gid))
+                except OSError:
+                    pass
+                continue
+            progress = None
+            target = _target_size(runner, gid)
+            path = marker.get("path") or _installed_paths(runner).get(gid)
+            if target and path:
+                progress = min(0.99, _dir_size(path) / float(target))
+            states.append(
+                {"runner": runner, "id": gid, "status": "installing", "progress": progress}
+            )
         return states
 
     async def _poll_loop(self) -> None:
         while True:
             try:
-                if self._inflight:
-                    states = self._compute_states()
+                states = self._compute_states()
+                active = len(states) > 0
+                # Emit while active, plus one final emit when the last completes
+                # so the UI can clear itself and restore artwork.
+                if active or self._had_active:
                     await decky.emit("install_states", states)
+                self._had_active = active
             except Exception as exc:  # noqa: BLE001
                 decky.logger.error(f"poll loop error: {exc}")
             await asyncio.sleep(3)

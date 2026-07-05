@@ -12,17 +12,32 @@ import {
   definePlugin,
   toaster,
 } from "@decky/api";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FaGamepad } from "react-icons/fa";
 
-import { getInstallStates, getSettings, setSettings } from "./api";
 import {
+  getAppIdMap,
+  getGames,
+  getInstallStates,
+  getSettings,
+  setSettings,
+} from "./api";
+import {
+  AppIdMap,
   BridgeSettings,
+  gameKey,
+  HeroicGame,
   InstallState,
+  InstallStatus,
   Runner,
   RUNNERS,
   STORE_LABELS,
 } from "./contract";
+import {
+  applyArtwork,
+  markDownloading,
+  moveToInstalledCollection,
+} from "./steam";
 import { syncLibrary } from "./sync";
 
 function Content() {
@@ -30,12 +45,51 @@ function Content() {
   const [installs, setInstalls] = useState<InstallState[]>([]);
   const [syncing, setSyncing] = useState(false);
 
+  const gamesRef = useRef<Record<string, HeroicGame>>({});
+  const appIdRef = useRef<AppIdMap>({});
+  const prevStatusRef = useRef<Record<string, InstallStatus>>({});
+
+  const refreshMaps = async () => {
+    try {
+      const [games, map] = await Promise.all([getGames(), getAppIdMap()]);
+      const byKey: Record<string, HeroicGame> = {};
+      for (const g of games) byKey[gameKey(g.runner, g.id)] = g;
+      gamesRef.current = byKey;
+      appIdRef.current = map;
+    } catch {
+      /* keep previous maps */
+    }
+  };
+
+  const handleStates = async (states: InstallState[]) => {
+    setInstalls(states);
+    for (const s of states) {
+      const key = gameKey(s.runner, s.id);
+      const prev = prevStatusRef.current[key];
+      const appId = appIdRef.current[key];
+      const game = gamesRef.current[key];
+      if (appId && s.status === "installing" && prev !== "installing") {
+        void markDownloading(appId, game?.artSquare ?? null);
+      }
+      if (appId && s.status === "installed" && prev !== "installed") {
+        if (game) void applyArtwork(appId, { ...game, installed: true });
+        void moveToInstalledCollection(appId);
+        toaster.toast({
+          title: "Heroic Deck Bridge",
+          body: `${game?.title ?? s.id} installed`,
+        });
+      }
+      prevStatusRef.current[key] = s.status;
+    }
+  };
+
   useEffect(() => {
     getSettings().then(setLocalSettings).catch(() => undefined);
-    getInstallStates().then(setInstalls).catch(() => undefined);
+    void refreshMaps();
+    getInstallStates().then((s) => void handleStates(s)).catch(() => undefined);
     const listener = addEventListener<[states: InstallState[]]>(
       "install_states",
-      (states) => setInstalls(states)
+      (states) => void handleStates(states)
     );
     return () => removeEventListener("install_states", listener);
   }, []);
@@ -58,6 +112,7 @@ function Content() {
     setSyncing(true);
     try {
       const res = await syncLibrary();
+      await refreshMaps();
       toaster.toast({
         title: "Heroic Deck Bridge",
         body: `Synced ${res.total} games (+${res.added}, -${res.removed}).`,

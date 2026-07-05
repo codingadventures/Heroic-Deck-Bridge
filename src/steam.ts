@@ -98,6 +98,63 @@ export async function applyArtwork(appId: number, game: HeroicGame): Promise<voi
   await setArt(appId, game.artCover, ELibraryAssetType.Header);
 }
 
+// Render a dimmed capsule with a "Downloading..." overlay while a game installs.
+// Steam has no native not-installed/greyed state for shortcuts, so we bake the
+// state into the artwork and restore the real art on completion.
+async function dimBase64(b64: string, mime: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width || 600;
+          canvas.height = img.height || 900;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return resolve(null);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "rgba(0,0,0,0.6)";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#ffffff";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.font = `bold ${Math.round(canvas.width / 9)}px sans-serif`;
+          ctx.fillText("Downloading...", canvas.width / 2, canvas.height / 2);
+          resolve(canvas.toDataURL("image/png").split(",")[1] ?? null);
+        } catch {
+          resolve(null);
+        }
+      };
+      img.onerror = () => resolve(null);
+      img.src = `data:${mime};base64,${b64}`;
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function markDownloading(
+  appId: number,
+  artUrl: string | null | undefined
+): Promise<void> {
+  if (!artUrl) return;
+  try {
+    const b64 = await fetchArt(artUrl);
+    if (!b64) return;
+    const mime = artUrl.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+    const dimmed = await dimBase64(b64, mime);
+    if (!dimmed) return;
+    await SteamClient.Apps.SetCustomArtworkForApp(
+      appId,
+      dimmed,
+      "png",
+      ELibraryAssetType.Capsule
+    );
+  } catch (e) {
+    console.error("[HeroicDeckBridge] markDownloading failed", e);
+  }
+}
+
 // --------------------------------------------------------------------------- //
 // Collections. VERIFY-ON-DEVICE: collectionStore surface can shift between
 // Steam client releases; every access is guarded.
@@ -139,9 +196,29 @@ async function addAppToCollection(appId: number, name: string): Promise<void> {
   }
 }
 
+async function removeAppFromCollection(appId: number, name: string): Promise<void> {
+  const col = findCollection(name);
+  if (!col) return;
+  try {
+    const overview = appStore.GetAppOverviewByAppID(appId);
+    if (!overview) return;
+    const ddc = col.AsDragDropCollection?.() ?? col;
+    ddc.RemoveApps?.([overview]);
+    await col.Save?.();
+  } catch (e) {
+    console.error("[HeroicDeckBridge] removeAppFromCollection failed", name, e);
+  }
+}
+
 export async function assignCollections(appId: number, game: HeroicGame): Promise<void> {
   await addAppToCollection(appId, `Heroic - ${STORE_LABELS[game.runner]}`);
   await addAppToCollection(appId, game.installed ? "Heroic - Installed" : "Heroic - Available");
+}
+
+// Called when an install completes: move the card from Available to Installed.
+export async function moveToInstalledCollection(appId: number): Promise<void> {
+  await addAppToCollection(appId, "Heroic - Installed");
+  await removeAppFromCollection(appId, "Heroic - Available");
 }
 
 // Best-effort nudge so freshly added shortcuts show up without a full restart.

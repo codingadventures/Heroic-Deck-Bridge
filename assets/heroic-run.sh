@@ -64,7 +64,16 @@ fi
 # survives launching/stopping other games. Pass an explicit ?path= so the
 # headless --no-gui install does not stall waiting on the install-path dialog.
 install_path="${INSTALL_PATH:-$HOME/Games/Heroic}"
-unit="heroic-install-${runner}-$(printf '%s' "$id" | tr -c 'A-Za-z0-9_.-' '_')"
+safe_id="$(printf '%s' "$id" | tr -c 'A-Za-z0-9_.-' '_')"
+unit="heroic-install-${runner}-${safe_id}"
+
+# Drop a marker so the Decky backend can track this install (progress + dimmed
+# artwork) even though it was started by a tile press, not the backend. The
+# backend removes the marker once the game appears in installed.json.
+marker_dir="$self_dir/installing"
+mkdir -p "$marker_dir"
+printf '{"runner":"%s","id":"%s","path":"%s"}\n' "$runner" "$id" "$install_path" \
+  > "$marker_dir/${runner}__${safe_id}.json"
 
 if command -v systemd-run >/dev/null 2>&1; then
   systemd-run --user --collect --unit="$unit" \
