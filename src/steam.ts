@@ -48,8 +48,12 @@ export async function addShortcut(
       launchOptions
     );
     if (appId) {
-      SteamClient.Apps.SetShortcutLaunchOptions(appId, launchOptions);
+      // AddShortcut does not reliably set these fields on all Steam builds
+      // (it left every card named "heroic-run.sh"), so set them explicitly.
+      SteamClient.Apps.SetShortcutName(appId, title);
+      SteamClient.Apps.SetShortcutExe(appId, wrapperPath);
       SteamClient.Apps.SetShortcutStartDir(appId, startDir);
+      SteamClient.Apps.SetShortcutLaunchOptions(appId, launchOptions);
     }
     return appId ?? null;
   } catch (e) {

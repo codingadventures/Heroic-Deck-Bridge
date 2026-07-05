@@ -15,6 +15,7 @@ import itertools
 import json
 import os
 import re
+import ssl
 import subprocess
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -416,12 +417,49 @@ def _ext_for(url: str, default: str = "jpg") -> str:
     return default
 
 
+_SSL_CTX: Optional[ssl.SSLContext] = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Decky's plugin Python does not reliably resolve a CA bundle, so the
+    default context fails with CERTIFICATE_VERIFY_FAILED on this device. Pin an
+    explicit system CA bundle; fall back to unverified only as a last resort
+    (the only thing we fetch is public, non-sensitive game cover art)."""
+    global _SSL_CTX
+    if _SSL_CTX is not None:
+        return _SSL_CTX
+    try:
+        import certifi  # type: ignore
+
+        _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+        return _SSL_CTX
+    except Exception:  # noqa: BLE001
+        pass
+    for ca in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/ssl/cert.pem",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ):
+        if os.path.exists(ca):
+            try:
+                _SSL_CTX = ssl.create_default_context(cafile=ca)
+                return _SSL_CTX
+            except Exception:  # noqa: BLE001
+                continue
+    _log_warn("no CA bundle found; falling back to unverified TLS for art")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    _SSL_CTX = ctx
+    return ctx
+
+
 def _download_bytes(url: str) -> Optional[bytes]:
     if not url:
         return None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "heroic-deck-bridge"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_context()) as resp:
             return resp.read()
     except Exception as exc:  # noqa: BLE001
         _log_warn(f"download failed for {url}: {exc}")
