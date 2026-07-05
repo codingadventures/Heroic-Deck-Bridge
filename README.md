@@ -30,6 +30,15 @@ logic.
   through a background **job queue** (sequential, cancellable, with progress and
   toasts), and emits updates to the Quick Access Menu panel. Tile-press installs
   are folded into the same queue.
+- **Install progress is real, not guessed.** The backend parses the installer's
+  own output (legendary / gogdl / nile) from the transient install unit's
+  journal — percentage, downloaded bytes, ETA and phase
+  (queued → downloading → verifying → installing → done). If no line is
+  parseable yet it sizes the *specific* game folder; if even that is unknown it
+  shows an honest **indeterminate** bar rather than a fake percentage. The card
+  tile itself shows a live "Downloading NN%" overlay (throttled to ~10% steps),
+  and completion fires a "▶ ready to play" toast and moves the card to
+  `Heroic - Installed`.
 - Artwork is applied two ways for robustness: instantly via Steam's in-session
   artwork API, and persisted as **grid files** keyed by each shortcut's appId so
   it survives restarts.
@@ -66,7 +75,10 @@ release URL.
 1. Open the plugin from the Decky menu, pick which stores to show and an install
    path, then press **Sync library to Steam**.
 2. Your Heroic games appear as cards in `Heroic - Epic/GOG/Amazon` collections.
-3. Press a card to install (if needed) or launch.
+3. Press a card to install (if needed) or launch. While a game installs, its
+   tile shows a live "Downloading NN%" overlay and the plugin panel's **Queue**
+   shows a progress bar with bytes and ETA; when it finishes you get a
+   "▶ ready to play" toast and the card moves to `Heroic - Installed`.
 
 - **Heroic "Add to Steam" games:** if you also added games through Heroic's own
   "Add to Steam", choose how to handle the overlap under *Heroic 'Add to Steam'
@@ -81,7 +93,14 @@ release URL.
 These are the irreducible costs of surfacing a non-Steam library inside Game Mode:
 
 - **No native download-progress bar / greyed tile.** Steam treats every shortcut
-  as "installed", so state is shown via collections and the plugin panel instead.
+  as "installed", so progress is surfaced via the plugin panel's bar (bytes +
+  ETA) and a live status overlay baked onto the card art, plus collections.
+- **Progress parsing depends on the installer running in the plugin's unit.** If
+  a Heroic window is already open, `heroic://install` is forwarded to that
+  instance and its output does not reach the unit journal; the plugin then falls
+  back to per-game folder sizing (still the specific game, never the install
+  root) or an indeterminate bar. Exact per-runner journal formats are
+  `VERIFY-ON-DEVICE`.
 - **Install must stay out of Steam's reaper.** Handled via `systemd-run --user` /
   the Heroic singleton; if that handoff is unavailable the plugin falls back to
   `setsid` detachment.

@@ -16,11 +16,25 @@ export interface HeroicGame {
 
 export type InstallStatus = "installing" | "installed" | "failed";
 
+// Finer-grained lifecycle phase within an install, surfaced for legible UI copy.
+// "queued" (unit started, no bytes yet), "downloading", "verifying" (hashing,
+// no byte growth), "installing" (writing/finalising), "done".
+export type InstallPhase =
+  | "queued"
+  | "downloading"
+  | "verifying"
+  | "installing"
+  | "done";
+
 export interface InstallState {
   runner: Runner;
   id: string;
   status: InstallStatus;
-  progress?: number | null; // 0..1, null when unknown
+  progress?: number | null; // 0..1, null when unknown/indeterminate
+  bytesDone?: number | null;
+  bytesTotal?: number | null;
+  etaSeconds?: number | null;
+  phase?: InstallPhase | null;
 }
 
 // How to treat games that already have Heroic's own "Add to Steam" shortcut
@@ -51,7 +65,11 @@ export interface Job {
   gameId: string;
   title: string;
   status: JobStatus;
-  progress?: number | null; // 0..1, null when unknown
+  progress?: number | null; // 0..1, null when unknown/indeterminate
+  bytesDone?: number | null;
+  bytesTotal?: number | null;
+  etaSeconds?: number | null;
+  phase?: InstallPhase | null;
   error?: string | null;
   adopted?: boolean; // started by a tile press, folded into the queue
 }

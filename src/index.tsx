@@ -4,6 +4,7 @@ import {
   DropdownItem,
   PanelSection,
   PanelSectionRow,
+  ProgressBarWithInfo,
   TextField,
   ToggleField,
   showModal,
@@ -35,6 +36,7 @@ import {
   gameKey,
   HeroicGame,
   HeroicNativeMode,
+  InstallPhase,
   InstallState,
   InstallStatus,
   Job,
@@ -65,7 +67,40 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   cancelled: "Cancelled",
 };
 
+const PHASE_LABEL: Record<InstallPhase, string> = {
+  queued: "Queued",
+  downloading: "Downloading",
+  verifying: "Verifying",
+  installing: "Installing",
+  done: "Ready",
+};
+
 const isActive = (s: JobStatus) => s === "queued" || s === "running";
+
+function formatBytes(n?: number | null): string | null {
+  if (typeof n !== "number" || n <= 0) return null;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(i <= 1 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatEta(s?: number | null): string | null {
+  if (typeof s !== "number" || s <= 0) return null;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+const pctOf = (progress?: number | null): number | null =>
+  typeof progress === "number" ? Math.round(progress * 100) : null;
 
 function Content() {
   const [settings, setLocalSettings] = useState<BridgeSettings | null>(null);
@@ -77,6 +112,9 @@ function Content() {
   const appIdRef = useRef<AppIdMap>({});
   const prevStatusRef = useRef<Record<string, InstallStatus>>({});
   const prevJobStatusRef = useRef<Record<string, JobStatus>>({});
+  // Throttle live tile-capsule redraws to ~10% steps (plus phase changes) so we
+  // don't repaint artwork on every 3s poll.
+  const tileTagRef = useRef<Record<string, string>>({});
 
   const refreshMaps = async () => {
     try {
@@ -96,16 +134,27 @@ function Content() {
       const prev = prevStatusRef.current[key];
       const appId = appIdRef.current[key];
       const game = gamesRef.current[key];
-      if (appId && s.status === "installing" && prev !== "installing") {
-        void markDownloading(appId, game?.artSquare ?? null);
+      if (appId && s.status === "installing") {
+        const phase: InstallPhase = s.phase ?? "downloading";
+        const pct = pctOf(s.progress);
+        const label =
+          pct !== null ? `${PHASE_LABEL[phase]} ${pct}%` : `${PHASE_LABEL[phase]}…`;
+        // Only repaint on a phase change or a new 10% bucket (or the first tick).
+        const bucket = pct === null ? -1 : Math.floor(pct / 10);
+        const tag = `${phase}:${bucket}`;
+        if (tileTagRef.current[key] !== tag) {
+          tileTagRef.current[key] = tag;
+          void markDownloading(appId, game?.artSquare ?? null, label);
+        }
       }
       if (appId && s.status === "installed" && prev !== "installed") {
         if (game) void applyArtwork(appId, { ...game, installed: true });
         void writeGridArt(appId, s.runner, s.id).catch(() => undefined);
         void moveToInstalledCollection(appId);
+        delete tileTagRef.current[key];
         toaster.toast({
           title: "Heroic Deck Bridge",
-          body: `${game?.title ?? s.id} installed`,
+          body: `▶ ${game?.title ?? s.id} ready to play`,
         });
       }
       prevStatusRef.current[key] = s.status;
@@ -126,6 +175,7 @@ function Content() {
           const key = gameKey(job.runner, job.gameId);
           const appId = appIdRef.current[key];
           const game = gamesRef.current[key];
+          delete tileTagRef.current[key];
           if (appId && game) void applyArtwork(appId, game);
         }
         if (job.status === "done" && job.kind === "uninstall") {
@@ -320,43 +370,81 @@ function Content() {
 
       {jobs.length > 0 && (
         <PanelSection title="Queue">
-          {jobs.map((job) => (
-            <PanelSectionRow key={job.id}>
-              <div style={{ width: "100%" }}>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontSize: "0.85rem",
-                  }}
-                >
-                  <span
+          {jobs.map((job) => {
+            const phase: InstallPhase =
+              job.phase ?? (job.status === "queued" ? "queued" : "downloading");
+            const pct = pctOf(job.progress);
+            const bytes =
+              job.kind === "install"
+                ? job.bytesTotal
+                  ? `${formatBytes(job.bytesDone) ?? "…"} / ${formatBytes(job.bytesTotal)}`
+                  : formatBytes(job.bytesDone)
+                : null;
+            const eta = formatEta(job.etaSeconds);
+            // A running install with no numeric progress yet is honestly
+            // indeterminate rather than pretending to be at 0%.
+            const showBar = job.status === "running";
+            const indeterminate = pct === null;
+            const opText =
+              job.kind === "uninstall"
+                ? "Uninstalling…"
+                : [PHASE_LABEL[phase], bytes].filter(Boolean).join(" · ");
+            const rightLabel =
+              job.status === "running"
+                ? PHASE_LABEL[phase]
+                : STATUS_LABEL[job.status];
+            return (
+              <PanelSectionRow key={job.id}>
+                <div style={{ width: "100%" }}>
+                  <div
                     style={{
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontSize: "0.85rem",
                     }}
                   >
-                    {job.title}
-                  </span>
-                  <span style={{ opacity: 0.7, flexShrink: 0, marginLeft: 8 }}>
-                    {STATUS_LABEL[job.status]}
-                    {job.status === "running" && typeof job.progress === "number"
-                      ? ` ${Math.round(job.progress * 100)}%`
-                      : ""}
-                  </span>
+                    <span
+                      style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {job.title}
+                    </span>
+                    <span style={{ opacity: 0.7, flexShrink: 0, marginLeft: 8 }}>
+                      {rightLabel}
+                    </span>
+                  </div>
+                  {job.status === "done" && job.kind === "install" && (
+                    <div
+                      style={{ marginTop: 4, fontSize: "0.8rem", opacity: 0.9 }}
+                    >
+                      ▶ Ready to play
+                    </div>
+                  )}
+                  {showBar && (
+                    <div style={{ marginTop: 6 }}>
+                      <ProgressBarWithInfo
+                        nProgress={pct ?? 0}
+                        indeterminate={indeterminate}
+                        sOperationText={opText}
+                        sTimeRemaining={eta ?? undefined}
+                      />
+                    </div>
+                  )}
+                  {isActive(job.status) && (
+                    <ButtonItem
+                      layout="below"
+                      onClick={() => void onCancel(job.id)}
+                    >
+                      Cancel
+                    </ButtonItem>
+                  )}
                 </div>
-                {isActive(job.status) && (
-                  <ButtonItem
-                    layout="below"
-                    onClick={() => void onCancel(job.id)}
-                  >
-                    Cancel
-                  </ButtonItem>
-                )}
-              </div>
-            </PanelSectionRow>
-          ))}
+              </PanelSectionRow>
+            );
+          })}
           {jobs.some((j) => !isActive(j.status)) && (
             <PanelSectionRow>
               <ButtonItem layout="below" onClick={() => void onClearFinished()}>

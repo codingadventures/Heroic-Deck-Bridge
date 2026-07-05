@@ -105,10 +105,16 @@ export async function applyArtwork(appId: number, game: HeroicGame): Promise<voi
   await setArt(appId, game.artCover, ELibraryAssetType.Header);
 }
 
-// Render a dimmed capsule with a "Downloading..." overlay while a game installs.
-// Steam has no native not-installed/greyed state for shortcuts, so we bake the
-// state into the artwork and restore the real art on completion.
-async function dimBase64(b64: string, mime: string): Promise<string | null> {
+// Render a dimmed capsule with a status overlay while a game installs. Steam
+// has no native not-installed/greyed state for shortcuts, so we bake the state
+// into the artwork and restore the real art on completion. The label is drawn
+// live (e.g. "Downloading 45%") so the tile itself communicates progress
+// without opening the QAM.
+async function dimBase64(
+  b64: string,
+  mime: string,
+  label: string
+): Promise<string | null> {
   return new Promise((resolve) => {
     try {
       const img = new Image();
@@ -125,8 +131,8 @@ async function dimBase64(b64: string, mime: string): Promise<string | null> {
           ctx.fillStyle = "#ffffff";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.font = `bold ${Math.round(canvas.width / 9)}px sans-serif`;
-          ctx.fillText("Downloading...", canvas.width / 2, canvas.height / 2);
+          ctx.font = `bold ${Math.round(canvas.width / 11)}px sans-serif`;
+          ctx.fillText(label, canvas.width / 2, canvas.height / 2);
           resolve(canvas.toDataURL("image/png").split(",")[1] ?? null);
         } catch {
           resolve(null);
@@ -140,16 +146,26 @@ async function dimBase64(b64: string, mime: string): Promise<string | null> {
   });
 }
 
+// Cache the fetched base capsule per art URL so redrawing the overlay on every
+// progress step (see index.tsx throttling) does not re-download the image.
+const baseArtCache = new Map<string, string>();
+
 export async function markDownloading(
   appId: number,
-  artUrl: string | null | undefined
+  artUrl: string | null | undefined,
+  label = "Downloading…"
 ): Promise<void> {
   if (!artUrl) return;
   try {
-    const b64 = await fetchArt(artUrl);
-    if (!b64) return;
+    let b64 = baseArtCache.get(artUrl);
+    if (!b64) {
+      const fetched = await fetchArt(artUrl);
+      if (!fetched) return;
+      b64 = fetched;
+      baseArtCache.set(artUrl, b64);
+    }
     const mime = artUrl.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
-    const dimmed = await dimBase64(b64, mime);
+    const dimmed = await dimBase64(b64, mime, label);
     if (!dimmed) return;
     await SteamClient.Apps.SetCustomArtworkForApp(
       appId,
@@ -219,7 +235,13 @@ async function removeAppFromCollection(appId: number, name: string): Promise<voi
 
 export async function assignCollections(appId: number, game: HeroicGame): Promise<void> {
   await addAppToCollection(appId, `Heroic - ${STORE_LABELS[game.runner]}`);
-  await addAppToCollection(appId, game.installed ? "Heroic - Installed" : "Heroic - Available");
+  if (game.installed) {
+    await addAppToCollection(appId, "Heroic - Installed");
+    await removeAppFromCollection(appId, "Heroic - Available");
+  } else {
+    await addAppToCollection(appId, "Heroic - Available");
+    await removeAppFromCollection(appId, "Heroic - Installed");
+  }
 }
 
 // Called when an install completes: move the card from Available to Installed.

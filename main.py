@@ -322,6 +322,176 @@ def _dir_size(path: str) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Install progress (real signal)
+#
+# Ground truth is the installer's own output (legendary / gogdl / nile), which
+# runs inside the transient `heroic-install-*` systemd --user unit, so its
+# stdout/stderr land in that unit's journal. We parse the latest percentage,
+# downloaded bytes and ETA from there. When no parseable line exists yet we fall
+# back to sizing the *specific* game folder (never the installPath root, which
+# would sum every installed game and pin progress near 100%), and to an honest
+# indeterminate state when even that is unknown.
+# --------------------------------------------------------------------------- #
+
+_MIB = 1024 * 1024
+
+
+def _safe_gid(gid: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", gid)
+
+
+def _install_unit_name(runner: str, gid: str) -> str:
+    return f"heroic-install-{runner}-{_safe_gid(gid)}"
+
+
+def _install_path_setting() -> str:
+    """Configured install root, read synchronously (mirrors get_settings'
+    default) so progress helpers don't need the async settings path."""
+    stored = _read_state("settings.json", {})
+    path = stored.get("installPath") if isinstance(stored, dict) else None
+    return path or os.path.join(_home(), "Games", "Heroic")
+
+
+def _game_folder_name(runner: str, gid: str) -> Optional[str]:
+    """Heroic's per-game install folder name (GameInfo.folder_name), created
+    under installPath early in a download and stable before installed.json."""
+    for entry in _library_entries(runner):
+        if _entry_id(entry) == gid:
+            fn = entry.get("folder_name") or entry.get("folderName")
+            return fn if isinstance(fn, str) and fn else None
+    return None
+
+
+def _game_install_dir(runner: str, gid: str, install_path: Optional[str]) -> Optional[str]:
+    """Path to the specific game's install/download folder, or None. Never
+    returns the installPath *root* (which would measure all games at once)."""
+    existing = _installed_paths(runner).get(gid)
+    if existing:
+        return existing
+    folder = _game_folder_name(runner, gid)
+    if install_path and folder:
+        return os.path.join(install_path, folder)
+    return None
+
+
+def _read_install_journal(runner: str, gid: str, lines: int = 200) -> str:
+    """Recent output lines from the install unit's journal, or "" if
+    unavailable. `-o cat` drops timestamps/metadata for cleaner parsing."""
+    unit = _install_unit_name(runner, gid)
+    try:
+        res = subprocess.run(
+            _as_user([
+                "journalctl", "--user", "-u", unit,
+                "-n", str(lines), "--no-pager", "-o", "cat",
+            ]),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return res.stdout or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# legendary/gogdl/nile share DLManager-style output, e.g.
+#   = Progress: 45.30% (1234/2444), Running for 00:01:23, ETA: 00:02:34
+#    - Downloaded: 1234.56 MiB, Written: 1200.00 MiB
+_PCT_STRICT_RE = re.compile(r"Progress:\s*([0-9]+(?:\.[0-9]+)?)\s*%", re.IGNORECASE)
+_PCT_LOOSE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*%")
+_ETA_RE = re.compile(r"ETA[:=]?\s*(\d+):(\d{1,2}):(\d{1,2})", re.IGNORECASE)
+_DOWNLOADED_RE = re.compile(r"Downloaded:\s*([0-9]+(?:\.[0-9]+)?)\s*MiB", re.IGNORECASE)
+_VERIFY_RE = re.compile(r"verif", re.IGNORECASE)
+
+
+def _parse_install_journal(text: str):
+    """Return (progress|None, bytesDone|None, etaSeconds|None, phase|None) from
+    installer output. Last match wins so we reflect the most recent line."""
+    if not text:
+        return None, None, None, None
+    lines = text.splitlines()
+    progress: Optional[float] = None
+    bytes_done: Optional[int] = None
+    eta: Optional[int] = None
+    phase: Optional[str] = None
+    saw_pct = False
+    for line in lines:
+        m = _PCT_STRICT_RE.search(line)
+        if m:
+            try:
+                progress = max(0.0, min(1.0, float(m.group(1)) / 100.0))
+                phase = "downloading"
+                saw_pct = True
+            except ValueError:
+                pass
+        m = _DOWNLOADED_RE.search(line)
+        if m:
+            try:
+                bytes_done = int(float(m.group(1)) * _MIB)
+            except ValueError:
+                pass
+        m = _ETA_RE.search(line)
+        if m:
+            h, mnt, s = (int(x) for x in m.groups())
+            eta = h * 3600 + mnt * 60 + s
+        if _VERIFY_RE.search(line):
+            phase = "verifying"
+    if not saw_pct:
+        # Only trust a bare "NN%" if no explicit "Progress:" line was present,
+        # to avoid picking up unrelated percentages.
+        for line in lines:
+            m = _PCT_LOOSE_RE.search(line)
+            if m:
+                try:
+                    progress = max(0.0, min(1.0, float(m.group(1)) / 100.0))
+                    if phase is None:
+                        phase = "downloading"
+                except ValueError:
+                    pass
+    return progress, bytes_done, eta, phase
+
+
+def _install_snapshot(runner: str, gid: str, install_path: Optional[str]) -> Dict[str, Any]:
+    """Current install snapshot: progress(0..1|None), bytesDone, bytesTotal,
+    etaSeconds, phase. Prefers the unit journal, then per-game folder size,
+    then honest indeterminate. progress is capped at 0.99 until truly done."""
+    if gid in _installed_ids(runner):
+        return {
+            "progress": 1.0,
+            "bytesDone": None,
+            "bytesTotal": _target_size(runner, gid),
+            "etaSeconds": None,
+            "phase": "done",
+        }
+    target = _target_size(runner, gid)
+    progress, bytes_done, eta, phase = _parse_install_journal(
+        _read_install_journal(runner, gid)
+    )
+    if progress is None:
+        gdir = _game_install_dir(runner, gid, install_path)
+        if gdir and target:
+            size = _dir_size(gdir)
+            if size > 0:
+                progress = size / float(target)
+                if bytes_done is None:
+                    bytes_done = size
+                if phase is None:
+                    phase = "downloading"
+    if bytes_done is None and progress is not None and target:
+        bytes_done = int(progress * target)
+    if progress is not None:
+        progress = min(0.99, progress)
+    if phase is None:
+        phase = "queued"
+    return {
+        "progress": progress,
+        "bytesDone": bytes_done,
+        "bytesTotal": target,
+        "etaSeconds": eta,
+        "phase": phase,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Steam userdata / grid artwork
 #
 # Grid-file writing is adapted from moraroy/NonSteamLaunchersDecky (MIT): the
@@ -740,8 +910,7 @@ class Plugin:
 
     def _fire_install(self, runner: str, gid: str, path: Optional[str]) -> None:
         """Fire the reaper-safe install handoff via a transient user unit."""
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", gid)
-        unit = f"heroic-install-{runner}-{safe}"
+        unit = _install_unit_name(runner, gid)
         proto = self._protocol_cmd("install", runner, gid, path)
         cmd = ["systemd-run", "--user", "--collect", f"--unit={unit}", *proto]
         # Track this install the same way tile-press installs are tracked, so the
@@ -754,8 +923,7 @@ class Plugin:
             subprocess.Popen(_as_user(proto), start_new_session=True)
 
     def _stop_install_unit(self, runner: str, gid: str) -> None:
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", gid)
-        unit = f"heroic-install-{runner}-{safe}"
+        unit = _install_unit_name(runner, gid)
         for action in ("stop", "reset-failed"):
             try:
                 subprocess.Popen(
@@ -816,6 +984,10 @@ class Plugin:
             "title": self._game_title(runner, gid),
             "status": "queued",
             "progress": None,
+            "bytesDone": None,
+            "bytesTotal": None,
+            "etaSeconds": None,
+            "phase": "queued",
             "error": None,
         }
         self._jobs.append(job)
@@ -905,12 +1077,13 @@ class Plugin:
         settings = await self.get_settings()
         path = settings.get("installPath")
         self._fire_install(runner, gid, path)
-        target = _target_size(runner, gid)
         # No-growth detection: a launch that never starts downloading (or a
-        # failed unit) should not hang the queue forever.
-        STALL_LIMIT = 60  # * 3s poll ≈ 3 min with zero progress
+        # failed unit) should not hang the queue forever. Based on the real
+        # progress signal (journal bytes, else per-game folder size), so a
+        # genuinely slow link is not mistaken for a stall; ~5 min tolerance.
+        STALL_LIMIT = 100  # * 3s poll ≈ 5 min with zero measurable progress
         stalled = 0
-        last_size = -1
+        last_signal = -1
         while True:
             await asyncio.sleep(3)
             if job_id in self._cancelled_ids:
@@ -922,29 +1095,36 @@ class Plugin:
             if gid in _installed_ids(runner):
                 job["status"] = "done"
                 job["progress"] = 1.0
+                job["phase"] = "done"
                 # Leave the marker in place: the poll loop's _compute_states
                 # emits the "installed" install_states event (which restores
                 # artwork + moves collections) and removes the marker itself.
                 await self._emit_queue()
                 _log_info(f"job {job_id} install complete: {runner}:{gid}")
                 return
-            cur = 0
-            gpath = _installed_paths(runner).get(gid) or path
-            if gpath:
-                cur = _dir_size(gpath)
-            if target:
-                job["progress"] = min(0.99, cur / float(target)) if target else None
-            if cur <= last_size:
-                stalled += 1
-            else:
+            snap = _install_snapshot(runner, gid, path)
+            job["progress"] = snap["progress"]
+            job["bytesDone"] = snap["bytesDone"]
+            job["bytesTotal"] = snap["bytesTotal"]
+            job["etaSeconds"] = snap["etaSeconds"]
+            job["phase"] = snap["phase"]
+            # Growth signal: prefer measured bytes, else the specific folder.
+            signal = snap["bytesDone"]
+            if signal is None:
+                gdir = _game_install_dir(runner, gid, path)
+                signal = _dir_size(gdir) if gdir else 0
+            # Verification does no byte growth by design; don't count it stalled.
+            if snap["phase"] == "verifying" or signal > last_signal:
                 stalled = 0
-            last_size = cur
+            else:
+                stalled += 1
+            last_signal = signal
             await self._emit_queue()
             if stalled >= STALL_LIMIT:
                 if self._install_unit_failed(runner, gid):
                     job["status"] = "failed"
                     job["error"] = "install unit failed"
-                elif cur == 0:
+                elif signal == 0:
                     job["status"] = "failed"
                     job["error"] = "no download progress detected"
                 else:
@@ -959,8 +1139,7 @@ class Plugin:
                 return
 
     def _install_unit_failed(self, runner: str, gid: str) -> bool:
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", gid)
-        unit = f"heroic-install-{runner}-{safe}"
+        unit = _install_unit_name(runner, gid)
         try:
             out = subprocess.run(
                 _as_user(["systemctl", "--user", "show", "-p", "ActiveState,Result", unit]),
@@ -1014,6 +1193,7 @@ class Plugin:
 
     def _compute_states(self) -> List[Dict[str, Any]]:
         states: List[Dict[str, Any]] = []
+        install_path = _install_path_setting()
         installed_cache: Dict[str, set] = {}
         for marker in self._read_markers():
             runner = marker["runner"]
@@ -1021,20 +1201,26 @@ class Plugin:
             if runner not in installed_cache:
                 installed_cache[runner] = _installed_ids(runner)
             if gid in installed_cache[runner]:
-                states.append({"runner": runner, "id": gid, "status": "installed", "progress": 1.0})
+                states.append({
+                    "runner": runner, "id": gid, "status": "installed",
+                    "progress": 1.0, "phase": "done",
+                })
                 try:
                     os.remove(_marker_file(runner, gid))
                 except OSError:
                     pass
                 continue
-            progress = None
-            target = _target_size(runner, gid)
-            path = marker.get("path") or _installed_paths(runner).get(gid)
-            if target and path:
-                progress = min(0.99, _dir_size(path) / float(target))
-            states.append(
-                {"runner": runner, "id": gid, "status": "installing", "progress": progress}
-            )
+            snap = _install_snapshot(runner, gid, marker.get("path") or install_path)
+            states.append({
+                "runner": runner,
+                "id": gid,
+                "status": "installing",
+                "progress": snap["progress"],
+                "bytesDone": snap["bytesDone"],
+                "bytesTotal": snap["bytesTotal"],
+                "etaSeconds": snap["etaSeconds"],
+                "phase": snap["phase"],
+            })
         return states
 
     def _active_job(self, runner: str, gid: str, kind: str) -> Optional[Dict[str, Any]]:
@@ -1077,11 +1263,16 @@ class Plugin:
                 "title": self._game_title(runner, gid),
                 "status": "running",
                 "progress": None,
+                "bytesDone": None,
+                "bytesTotal": None,
+                "etaSeconds": None,
+                "phase": "queued",
                 "error": None,
                 "adopted": True,
             })
             changed = True
 
+        install_path = _install_path_setting()
         for job in self._jobs:
             if not job.get("adopted") or job["status"] != "running":
                 continue
@@ -1089,6 +1280,7 @@ class Plugin:
             if gid in installed(runner):
                 job["status"] = "done"
                 job["progress"] = 1.0
+                job["phase"] = "done"
                 changed = True
                 continue
             m = marker_set.get((runner, gid))
@@ -1097,11 +1289,13 @@ class Plugin:
                 job["error"] = "install ended before completion"
                 changed = True
                 continue
-            target = _target_size(runner, gid)
-            path = m.get("path") or _installed_paths(runner).get(gid)
-            if target and path:
-                job["progress"] = min(0.99, _dir_size(path) / float(target))
-                changed = True
+            snap = _install_snapshot(runner, gid, m.get("path") or install_path)
+            job["progress"] = snap["progress"]
+            job["bytesDone"] = snap["bytesDone"]
+            job["bytesTotal"] = snap["bytesTotal"]
+            job["etaSeconds"] = snap["etaSeconds"]
+            job["phase"] = snap["phase"]
+            changed = True
         return changed
 
     async def _poll_loop(self) -> None:
