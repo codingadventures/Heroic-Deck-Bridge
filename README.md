@@ -117,6 +117,10 @@ This plugin adapts patterns (not verbatim code) from two other Decky projects:
   events) is modeled on
   [jurassicplayer/decky-autoflatpaks](https://github.com/jurassicplayer/decky-autoflatpaks)
   (BSD-3-Clause).
+- `assets/cacert.pem` is the Mozilla CA bundle vendored from
+  [certifi](https://github.com/certifi/python-certifi) (MPL-2.0). It is used so
+  artwork downloads verify TLS on any device, since Decky's bundled Python does
+  not reliably resolve the OS CA store.
 
 ## License
 

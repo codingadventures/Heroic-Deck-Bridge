@@ -420,32 +420,82 @@ def _ext_for(url: str, default: str = "jpg") -> str:
 _SSL_CTX: Optional[ssl.SSLContext] = None
 
 
-def _ssl_context() -> ssl.SSLContext:
-    """Decky's plugin Python does not reliably resolve a CA bundle, so the
-    default context fails with CERTIFICATE_VERIFY_FAILED on this device. Pin an
-    explicit system CA bundle; fall back to unverified only as a last resort
-    (the only thing we fetch is public, non-sensitive game cover art)."""
-    global _SSL_CTX
-    if _SSL_CTX is not None:
-        return _SSL_CTX
+def _ca_file_candidates() -> List[str]:
+    """CA-bundle files to try, most portable first. Decky ships its own Python
+    whose built-in cert path often points at a non-existent build-time prefix,
+    so we cannot trust the interpreter default. The vendored bundle
+    (assets/cacert.pem, Mozilla's roots via certifi) makes this work on any
+    device regardless of OS cert layout; OS/env paths are fallbacks."""
+    out: List[str] = []
+    plugin_dir = getattr(decky, "DECKY_PLUGIN_DIR", os.path.dirname(__file__))
+    out.append(os.path.join(plugin_dir, "assets", "cacert.pem"))
     try:
         import certifi  # type: ignore
 
-        _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
-        return _SSL_CTX
+        out.append(certifi.where())
     except Exception:  # noqa: BLE001
         pass
-    for ca in (
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/ssl/cert.pem",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-    ):
-        if os.path.exists(ca):
-            try:
-                _SSL_CTX = ssl.create_default_context(cafile=ca)
+    for env in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        val = os.environ.get(env)
+        if val:
+            out.append(val)
+    try:
+        dvp = ssl.get_default_verify_paths()
+        for p in (dvp.cafile, dvp.openssl_cafile):
+            if p:
+                out.append(p)
+    except Exception:  # noqa: BLE001
+        pass
+    out += [
+        "/etc/ssl/certs/ca-certificates.crt",  # Arch/SteamOS, Debian/Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",  # Fedora/RHEL/Bazzite
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  # Fedora extracted
+        "/etc/ssl/cert.pem",  # some minimal/BSD-ish layouts
+        "/var/lib/ca-certificates/ca-bundle.pem",  # openSUSE
+    ]
+    return out
+
+
+def _loaded_ok(ctx: ssl.SSLContext) -> bool:
+    try:
+        return ctx.cert_store_stats().get("x509_ca", 0) > 0
+    except Exception:  # noqa: BLE001
+        return True  # can't introspect; assume usable
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Build a verifying SSL context that works across devices, falling back to
+    unverified only as a last resort (the only thing we fetch is public,
+    non-sensitive game cover art)."""
+    global _SSL_CTX
+    if _SSL_CTX is not None:
+        return _SSL_CTX
+    seen: set = set()
+    for ca in _ca_file_candidates():
+        if not ca or ca in seen:
+            continue
+        seen.add(ca)
+        if not os.path.isfile(ca):
+            continue
+        try:
+            ctx = ssl.create_default_context(cafile=ca)
+            if _loaded_ok(ctx):
+                _log_info(f"using CA bundle: {ca}")
+                _SSL_CTX = ctx
                 return _SSL_CTX
+        except Exception:  # noqa: BLE001
+            continue
+    # Hashed cert directory (capath) as a further fallback.
+    for capath in ("/etc/ssl/certs", "/etc/pki/tls/certs"):
+        if os.path.isdir(capath):
+            try:
+                ctx = ssl.create_default_context(capath=capath)
+                if _loaded_ok(ctx):
+                    _log_info(f"using CA path: {capath}")
+                    _SSL_CTX = ctx
+                    return _SSL_CTX
             except Exception:  # noqa: BLE001
-                continue
+                pass
     _log_warn("no CA bundle found; falling back to unverified TLS for art")
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
