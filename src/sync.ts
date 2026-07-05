@@ -1,3 +1,5 @@
+import { toaster } from "@decky/api";
+
 import {
   getAppIdMap,
   getGames,
@@ -87,4 +89,62 @@ export async function syncLibrary(): Promise<SyncResult> {
   await saveAppIdMap(newMap);
   refreshLibrary();
   return { added, updated, removed, total: games.length };
+}
+
+// --------------------------------------------------------------------------- //
+// Sync controller (module-level singleton)
+//
+// The QAM panel component unmounts whenever the user leaves the Decky tab, so a
+// local `syncing` useState is lost on return even though the sync keeps running
+// in the plugin's (persistent) JS context. Hoisting the in-flight state here
+// lets the button re-derive "Syncing..." on remount, and guarantees the
+// completion/failure toast fires regardless of whether the panel is open.
+// --------------------------------------------------------------------------- //
+
+type SyncListener = (syncing: boolean) => void;
+
+let syncInFlight: Promise<SyncResult> | null = null;
+const syncListeners = new Set<SyncListener>();
+
+export function isSyncing(): boolean {
+  return syncInFlight !== null;
+}
+
+export function subscribeSyncing(listener: SyncListener): () => void {
+  syncListeners.add(listener);
+  return () => {
+    syncListeners.delete(listener);
+  };
+}
+
+function notifySyncing(): void {
+  const state = isSyncing();
+  for (const listener of syncListeners) listener(state);
+}
+
+// Start a sync (or return the one already in progress, coalescing double-taps).
+export function runSync(): Promise<SyncResult> {
+  if (syncInFlight) return syncInFlight;
+  syncInFlight = (async () => {
+    try {
+      const res = await syncLibrary();
+      toaster.toast({
+        title: "Heroic Deck Bridge",
+        body: `Synced ${res.total} games (+${res.added}, -${res.removed}).`,
+      });
+      return res;
+    } catch (e) {
+      console.error("[HeroicDeckBridge] sync failed", e);
+      toaster.toast({
+        title: "Heroic Deck Bridge",
+        body: "Sync failed - see logs.",
+      });
+      throw e;
+    } finally {
+      syncInFlight = null;
+      notifySyncing();
+    }
+  })();
+  notifySyncing();
+  return syncInFlight;
 }

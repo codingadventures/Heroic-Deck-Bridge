@@ -44,7 +44,7 @@ import {
   markDownloading,
   moveToInstalledCollection,
 } from "./steam";
-import { syncLibrary } from "./sync";
+import { isSyncing, runSync, subscribeSyncing } from "./sync";
 
 const STATUS_LABEL: Record<JobStatus, string> = {
   queued: "Queued",
@@ -59,7 +59,7 @@ const isActive = (s: JobStatus) => s === "queued" || s === "running";
 function Content() {
   const [settings, setLocalSettings] = useState<BridgeSettings | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [syncing, setSyncing] = useState(false);
+  const [syncing, setSyncing] = useState(isSyncing());
 
   const gamesRef = useRef<Record<string, HeroicGame>>({});
   const appIdRef = useRef<AppIdMap>({});
@@ -150,9 +150,16 @@ function Content() {
       "queue_state",
       (queue) => handleQueue(queue)
     );
+    // Reflect the module-level sync state so the button survives leaving and
+    // returning to the Decky tab; refresh maps when a sync finishes.
+    const unsubscribeSync = subscribeSyncing((state) => {
+      setSyncing(state);
+      if (!state) void refreshMaps();
+    });
     return () => {
       removeEventListener("install_states", stateListener);
       removeEventListener("queue_state", queueListener);
+      unsubscribeSync();
     };
   }, []);
 
@@ -187,19 +194,11 @@ function Content() {
   };
 
   const onSync = async () => {
-    setSyncing(true);
     try {
-      const res = await syncLibrary();
+      await runSync();
       await refreshMaps();
-      toaster.toast({
-        title: "Heroic Deck Bridge",
-        body: `Synced ${res.total} games (+${res.added}, -${res.removed}).`,
-      });
-    } catch (e) {
-      console.error("[HeroicDeckBridge] sync failed", e);
-      toaster.toast({ title: "Heroic Deck Bridge", body: "Sync failed - see logs." });
-    } finally {
-      setSyncing(false);
+    } catch {
+      /* toast + logging handled by the sync controller */
     }
   };
 
