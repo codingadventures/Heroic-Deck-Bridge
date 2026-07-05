@@ -1,0 +1,11 @@
+{
+  "name": "Heroic Deck Bridge",
+  "author": "codingadventures",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["library", "games", "utility"],
+    "description": "Browse and install your Heroic (Epic, GOG, Amazon) library as native Steam Game Mode cards. Heroic handles all compatibility; this plugin mirrors your library and triggers installs from Game Mode.",
+    "image": "https://opengraph.githubassets.com/1/codingadventures/Heroic-Deck-Bridge"
+  }
+}

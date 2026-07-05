@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_NAME: Heroic Deck Bridge
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Assemble plugin directory
+        run: |
+          set -euo pipefail
+          out="dist-plugin/${PLUGIN_NAME}"
+          mkdir -p "$out"
+          cp -r dist "$out/"
+          cp -r assets "$out/"
+          cp plugin.json package.json main.py README.md LICENSE "$out/"
+          # Decky expects the zip's top-level folder to be the plugin name.
+          ref="${GITHUB_REF_NAME:-manual}"
+          (cd dist-plugin && zip -r "../heroic-deck-bridge-${ref}.zip" "${PLUGIN_NAME}")
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: heroic-deck-bridge-*.zip
+          generate_release_notes: true
