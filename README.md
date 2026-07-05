@@ -24,8 +24,13 @@ logic.
     (a different cgroup than Steam's `reaper` scope) so the download **survives
     launching or stopping another game**, and passes an explicit `?path=` so the
     headless `--no-gui` install does not stall on the path dialog.
-- The Decky backend reads Heroic's library caches, tracks install progress, and
-  emits updates to the Quick Access Menu panel.
+- The Decky backend reads Heroic's library caches, runs installs/uninstalls
+  through a background **job queue** (sequential, cancellable, with progress and
+  toasts), and emits updates to the Quick Access Menu panel. Tile-press installs
+  are folded into the same queue.
+- Artwork is applied two ways for robustness: instantly via Steam's in-session
+  artwork API, and persisted as **grid files** keyed by each shortcut's appId so
+  it survives restarts.
 
 ```
 Heroic library JSON ──> Decky backend ──> frontend
@@ -92,6 +97,26 @@ Deploy to a Deck with Decky's developer tooling (or copy the assembled plugin
 folder into `~/homebrew/plugins`). The release workflow
 (`.github/workflows/release.yml`) builds and publishes an installable zip on any
 `v*` tag.
+
+### Debugging on device
+
+Game Mode has no visible console. See [docs/REMOTE_DEBUG.md](docs/REMOTE_DEBUG.md)
+for the CEF remote-debugging workflow — enable remote debugging, attach a
+browser to `http://<device-ip>:8081`, and filter the console on the
+`[HeroicDeckBridge]` prefix. Backend logs live in
+`~/homebrew/logs/Heroic Deck Bridge/`.
+
+## Credits
+
+This plugin adapts patterns (not verbatim code) from two other Decky projects:
+
+- Deterministic grid-art file writing and Steam userdata resolution are modeled
+  on [moraroy/NonSteamLaunchersDecky](https://github.com/moraroy/NonSteamLaunchersDecky)
+  (MIT).
+- The background job-queue design (sequential worker with progress/completion
+  events) is modeled on
+  [jurassicplayer/decky-autoflatpaks](https://github.com/jurassicplayer/decky-autoflatpaks)
+  (BSD-3-Clause).
 
 ## License
 

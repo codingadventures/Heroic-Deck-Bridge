@@ -28,6 +28,26 @@ export interface BridgeSettings {
   stores: Record<Runner, boolean>;
 }
 
+export type JobKind = "install" | "uninstall";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export interface Job {
+  id: string;
+  kind: JobKind;
+  runner: Runner;
+  gameId: string;
+  title: string;
+  status: JobStatus;
+  progress?: number | null; // 0..1, null when unknown
+  error?: string | null;
+  adopted?: boolean; // started by a tile press, folded into the queue
+}
+
 export type AppIdMap = Record<string, number>; // "runner:id" -> Steam appId
 
 export const STORE_LABELS: Record<Runner, string> = {

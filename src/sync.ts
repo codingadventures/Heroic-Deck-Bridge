@@ -3,6 +3,7 @@ import {
   getGames,
   getWrapperPath,
   saveAppIdMap,
+  writeGridArt,
 } from "./api";
 import { AppIdMap, gameKey } from "./contract";
 import {
@@ -64,6 +65,14 @@ export async function syncLibrary(): Promise<SyncResult> {
 
     await applyArtwork(appId, game);
     await assignCollections(appId, game);
+    // Persist the same art as grid files keyed by the appId Steam just handed
+    // us, so artwork survives restarts and does not depend solely on the
+    // in-session SetCustomArtworkForApp call.
+    try {
+      await writeGridArt(appId, game.runner, game.id);
+    } catch (e) {
+      console.error("[HeroicDeckBridge] writeGridArt failed", e);
+    }
   }
 
   // Prune shortcuts for games no longer owned/enabled.

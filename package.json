@@ -1,6 +1,6 @@
 {
   "name": "heroic-deck-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browse and install your Heroic (Epic / GOG / Amazon) library as native Steam Game Mode cards, powered by Heroic.",
   "type": "module",
   "scripts": {

@@ -10,12 +10,15 @@ declare const SteamClient: any;
 declare const collectionStore: any;
 declare const appStore: any;
 
-// SteamClient.Apps.SetCustomArtworkForApp asset types. VERIFY-ON-DEVICE.
+// SteamClient.Apps.SetCustomArtworkForApp asset types. These values are
+// cross-checked against moraroy/NonSteamLaunchersDecky's shipped createShortcut
+// (Grid/portrait=0, Hero=1, Logo=2, WideGrid/header=3), so they are no longer a
+// guess. Icon (4) remains unverified but is unused here.
 export enum ELibraryAssetType {
   Capsule = 0, // vertical/portrait grid (600x900)
   Hero = 1,
   Logo = 2,
-  Header = 3, // horizontal capsule (460x215)
+  Header = 3, // horizontal capsule / wide grid
   Icon = 4,
 }
 
